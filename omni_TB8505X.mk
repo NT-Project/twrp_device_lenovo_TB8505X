@@ -12,8 +12,8 @@ $(call inherit-product, $(SRC_TARGET_DIR)/product/base.mk)
 $(call inherit-product, vendor/omni/config/common.mk)
 
 # Device identifier. This must come after all inclusions
-PRODUCT_DEVICE := TB8505F
-PRODUCT_NAME := omni_TB8505F
+PRODUCT_DEVICE := TB8505X
+PRODUCT_NAME := omni_TB8505X
 PRODUCT_BRAND := Lenovo
 PRODUCT_MODEL := Lenovo TB-8505F
 PRODUCT_MANUFACTURER := LENOVO

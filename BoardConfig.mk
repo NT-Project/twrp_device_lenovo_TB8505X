@@ -5,7 +5,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 
-DEVICE_PATH := device/Lenovo/TB8505F
+DEVICE_PATH := device/Lenovo/TB8505X
 
 # Architecture
 TARGET_ARCH := arm64
@@ -30,7 +30,7 @@ TARGET_NO_BOOTLOADER := true
 TARGET_BOARD_PLATFORM := mt6761
 
 # Assert
-TARGET_OTA_ASSERT_DEVICE := TB8505F
+TARGET_OTA_ASSERT_DEVICE := TB8505X
 
 # AVB
 BOARD_AVB_ENABLE := true
