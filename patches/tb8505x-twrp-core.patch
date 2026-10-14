@@ -1,0 +1,792 @@
+diff --git a/crypto/vold_decrypt/Android.mk b/crypto/vold_decrypt/Android.mk
+index a36abf4..1a40c78 100755
+--- a/crypto/vold_decrypt/Android.mk
++++ b/crypto/vold_decrypt/Android.mk
+@@ -115,6 +115,9 @@ ifeq ($(TW_INCLUDE_CRYPTO), true)
+         LOCAL_SRC_FILES = vold_decrypt.cpp
+         LOCAL_SHARED_LIBRARIES := libcutils
+         LOCAL_C_INCLUDES += system/extras/ext4_utils/include
++        LOCAL_C_INCLUDES += bootable/recovery/twrpinstall/include
++        LOCAL_C_INCLUDES += system/core/libziparchive/include
++        LOCAL_C_INCLUDES += system/core/base/include
+         ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 29; echo $$?),0)
+             LOCAL_C_INCLUDES += bootable/recovery/crypto/fscrypt
+         else
+@@ -122,7 +125,12 @@ ifeq ($(TW_INCLUDE_CRYPTO), true)
+         endif
+         include $(BUILD_STATIC_LIBRARY)
+ 
+-        ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 28; echo $$?),0)
++        # vdc_pie is provided by bootable/recovery/prebuilt/Android.mk
++        # (prebuilt vdc_pie-<arch>, installed to /system/bin/vdc_pie where
++        # vold_decrypt expects it on SDK >= 28). Building it from source
++        # here would collide with that module (duplicate vdc_pie), so the
++        # source build is disabled.
++        ifeq ($(shell test $(PLATFORM_SDK_VERSION) -ge 99; echo $$?),0)
+             include $(CLEAR_VARS)
+             LOCAL_MODULE := vdc_pie
+             LOCAL_SRC_FILES := vdc_pie.cpp
+diff --git a/crypto/vold_decrypt/init.recovery.vold_decrypt.rc b/crypto/vold_decrypt/init.recovery.vold_decrypt.rc
+index 65983eb..6eccc52 100755
+--- a/crypto/vold_decrypt/init.recovery.vold_decrypt.rc
++++ b/crypto/vold_decrypt/init.recovery.vold_decrypt.rc
+@@ -1,10 +1,10 @@
+-
+-service sys_vold /system/bin/vold \
++service sys_vold /system_root/system/bin/vold \
+         --blkid_context=u:r:blkid:s0 --blkid_untrusted_context=u:r:blkid_untrusted:s0 \
+         --fsck_context=u:r:fsck:s0 --fsck_untrusted_context=u:r:fsck_untrusted:s0
+     socket vold stream 0660 root mount
+     socket cryptd stream 0660 root mount
+-    setenv PATH /system/bin
+-    setenv LD_LIBRARY_PATH /system/lib64:/system/lib
++    setenv PATH /system/bin:/system_root/system/bin
++    setenv LD_LIBRARY_PATH /system_root/system/lib64:/system_root/system/lib:/vendor/lib64:/system/lib64:/system/lib
++    seclabel u:r:recovery:s0
+     disabled
+     oneshot
+diff --git a/crypto/vold_decrypt/vold_decrypt.cpp b/crypto/vold_decrypt/vold_decrypt.cpp
+index 4a76405..b5507cb 100755
+--- a/crypto/vold_decrypt/vold_decrypt.cpp
++++ b/crypto/vold_decrypt/vold_decrypt.cpp
+@@ -69,6 +69,7 @@ namespace {
+ #define PASSWORD_TYPE_RESULT   213
+ 
+ 
++#undef LOGINFO
+ #define LOGINFO(...)  do { printf(__VA_ARGS__); if (fp_kmsg) { fprintf(fp_kmsg, "[VOLD_DECRYPT]I:" __VA_ARGS__); fflush(fp_kmsg); } } while (0)
+ #define LOGKMSG(...)  do { if (fp_kmsg) { fprintf(fp_kmsg, "[VOLD_DECRYPT]K:" __VA_ARGS__); fflush(fp_kmsg); } } while (0)
+ #define LOGERROR(...) do { printf(__VA_ARGS__); if (fp_kmsg) { fprintf(fp_kmsg, "[VOLD_DECRYPT]E:" __VA_ARGS__); fflush(fp_kmsg); } } while (0)
+@@ -243,6 +244,7 @@ bool Service_Exists(const string& initrc_svc) {
+ 	return (Get_Service_State(initrc_svc) != "error");
+ }
+ 
++#ifdef TW_CRYPTO_SYSTEM_VOLD_SERVICES
+ bool Is_Service_Running(const string& initrc_svc) {
+ 	return (Get_Service_State(initrc_svc) == "running");
+ }
+@@ -250,6 +252,7 @@ bool Is_Service_Running(const string& initrc_svc) {
+ bool Is_Service_Stopped(const string& initrc_svc) {
+ 	return (Get_Service_State(initrc_svc) == "stopped");
+ }
++#endif
+ 
+ bool Start_Service(const string& initrc_svc, int utimeout = SLEEP_MAX_USEC) {
+ 	string res = "error";
+@@ -293,9 +296,11 @@ bool is_Firmware_Mounted(void) {
+ 	return is_mounted;
+ }
+ 
++#ifdef TW_CRYPTO_SYSTEM_VOLD_SERVICES
+ bool will_VendorBin_Be_Symlinked(void) {
+ 	return (!is_Vendor_Mounted() && TWFunc::Path_Exists("/system/vendor"));
+ }
++#endif
+ 
+ bool Symlink_Vendor_Folder(void) {
+ 	bool is_vendor_symlinked = false;
+@@ -403,21 +408,51 @@ void Symlink_Firmware_Files(bool is_vendor_symlinked, bool is_firmware_symlinked
+ // use /etc/recovery.fstab -> symlink it temporarily. Reference:
+ // https://android.googlesource.com/platform/system/core/+/android-8.0.0_r17/fs_mgr/fs_mgr_fstab.cpp#693
+ bool Symlink_Recovery_Fstab(void) {
+-	bool is_fstab_symlinked = false;
++bool is_fstab_symlinked = false;
+ 
+-	if (vrename("/etc/recovery.fstab", "/etc/recovery-fstab-orig") == 0) {
+-		is_fstab_symlinked = true;
++char prop_value[PROPERTY_VALUE_MAX];
++property_get("ro.hardware", prop_value, "error");
+ 
+-		// now attempt to symlink to /fstab.{ro.hardware}, but even if that
+-		// fails, keep TWRP's fstab hidden since it cannot be parsed by fs_mgr
+-		char prop_value[PROPERTY_VALUE_MAX];
+-		property_get("ro.hardware", prop_value, "error");
+-		if (strcmp(prop_value, "error")) {
+-			string fstab_device = "/fstab."; fstab_device += prop_value;
+-			vsymlink(fstab_device, "/etc/recovery.fstab");
+-		}
+-	}
+-	return is_fstab_symlinked;
++if (!strcmp(prop_value, "error")) {
++LOGERROR("TB8505X: ro.hardware unavailable; keeping recovery fstab\n");
++return false;
++}
++
++string root_fstab = "/fstab.";
++root_fstab += prop_value;
++
++string vendor_fstab = "/vendor/etc/fstab.";
++vendor_fstab += prop_value;
++
++string source_fstab;
++
++if (TWFunc::Path_Exists(root_fstab)) {
++source_fstab = root_fstab;
++} else if (TWFunc::Path_Exists(vendor_fstab)) {
++source_fstab = vendor_fstab;
++} else {
++LOGERROR("TB8505X: stock fstab not found at '%s' or '%s'\n",
++         root_fstab.c_str(), vendor_fstab.c_str());
++return false;
++}
++
++if (vrename("/etc/recovery.fstab", "/etc/recovery-fstab-orig") != 0) {
++LOGERROR("TB8505X: failed to preserve recovery fstab\n");
++return false;
++}
++
++if (vsymlink(source_fstab, "/etc/recovery.fstab") != 0) {
++LOGERROR("TB8505X: failed to expose stock fstab '%s'\n",
++         source_fstab.c_str());
++vrename("/etc/recovery-fstab-orig", "/etc/recovery.fstab");
++return false;
++}
++
++LOGINFO("TB8505X: using stock vold fstab '%s'\n",
++        source_fstab.c_str());
++
++is_fstab_symlinked = true;
++return is_fstab_symlinked;
+ }
+ 
+ void Restore_Recovery_Fstab(void) {
+@@ -775,9 +810,9 @@ void Set_Needed_Properties(void) {
+ 		if (!ro_storage_structure.empty())
+ 			property_set("ro.storage_structure", ro_storage_structure.c_str());
+ 	}
+-	property_set("hwservicemanager.ready", "false");
+-	property_set("sys.listeners.registered", "false");
+-	property_set("vendor.sys.listeners.registered", "false");
++	property_set("hwservicemanager.ready", "true");
++	property_set("sys.listeners.registered", "true");
++	property_set("vendor.sys.listeners.registered", "true");
+ }
+ 
+ void Update_Patch_Level(void) {
+@@ -913,62 +948,187 @@ static unsigned int get_blkdev_size(int fd) {
+ }
+ 
+ #define CRYPT_FOOTER_OFFSET 0x4000
+-static char footer[16 * 1024];
+-const char* userdata_path;
+-static off64_t offset;
+ 
+ int footer_br(const string& command) {
+-	int fd;
+-
+-	if (command == "backup") {
+-		unsigned int nr_sec;
+-		TWPartition* userdata = PartitionManager.Find_Partition_By_Path("/data");
+-		userdata_path = userdata->Actual_Block_Device.c_str();
+-		fd = open(userdata_path, O_RDONLY);
+-		if (fd < 0) {
+-			LOGERROR("E:footer_backup: Cannot open '%s': %s\n", userdata_path, strerror(errno));
+-			return -1;
+-		}
+-		if ((nr_sec = get_blkdev_size(fd))) {
+-			offset = ((off64_t)nr_sec * 512) - CRYPT_FOOTER_OFFSET;
+-		} else {
+-			LOGERROR("E:footer_br: Failed to get offset\n");
+-			close(fd);
+-			return -1;
+-		}
+-		if (lseek64(fd, offset, SEEK_SET) == -1) {
+-			LOGERROR("E:footer_backup: Failed to lseek64\n");
+-			close(fd);
+-			return -1;
+-		}
+-		if (read(fd, footer, sizeof(footer)) != sizeof(footer)) {
+-			LOGERROR("E:footer_br: Failed to read: %s\n", strerror(errno));
+-			close(fd);
+-			return -1;
+-		}
+-		close(fd);
+-	} else if (command == "restore") {
+-		fd = open(userdata_path, O_WRONLY);
+-		if (fd < 0) {
+-			LOGERROR("E:footer_restore: Cannot open '%s': %s\n", userdata_path, strerror(errno));
+-			return -1;
+-		}
+-		if (lseek64(fd, offset, SEEK_SET) == -1) {
+-			LOGERROR("E:footer_restore: Failed to lseek64\n");
+-			close(fd);
+-			return -1;
+-		}
+-		if (write(fd, footer, sizeof(footer)) != sizeof(footer)) {
+-			LOGERROR("E:footer_br: Failed to write: %s\n", strerror(errno));
+-			close(fd);
+-			return -1;
+-		}
+-		close(fd);
+-	} else {
+-		LOGERROR("E:footer_br: wrong command argument: %s\n", command.c_str());
+-		return -1;
+-	}
+-	return 0;
++static char footer[CRYPT_FOOTER_OFFSET];
++static string footer_path;
++static off64_t footer_offset = 0;
++static bool footer_valid = false;
++
++int fd = -1;
++
++if (command == "backup") {
++footer_valid = false;
++footer_path.clear();
++footer_offset = 0;
++
++TWPartition* userdata =
++PartitionManager.Find_Partition_By_Path("/data");
++
++if (!userdata) {
++LOGERROR("footer_br: /data partition not found\n");
++return -1;
++}
++
++/*
++ * Android FDE supports two layouts:
++ *
++ * 1. key_loc == "footer":
++ *    Crypto metadata lives in the last 16 KiB of userdata.
++ *
++ * 2. key_loc == an absolute path:
++ *    Crypto metadata lives at offset 0 of that external
++ *    metadata block device/file.
++ *
++ * TB-8505X uses:
++ * /dev/block/platform/bootdevice/by-name/metadata
++ */
++if (!userdata->Crypto_Key_Location.empty() &&
++    userdata->Crypto_Key_Location[0] == '/') {
++
++footer_path = userdata->Crypto_Key_Location;
++footer_offset = 0;
++
++LOGINFO("footer_br: external crypto metadata '%s', offset 0\n",
++        footer_path.c_str());
++
++} else if (userdata->Crypto_Key_Location == "footer") {
++
++footer_path = userdata->Actual_Block_Device;
++
++fd = open(footer_path.c_str(), O_RDONLY | O_CLOEXEC);
++if (fd < 0) {
++LOGERROR("footer_br: cannot open userdata '%s': %s\n",
++         footer_path.c_str(), strerror(errno));
++return -1;
++}
++
++unsigned long nr_sec = get_blkdev_size(fd);
++close(fd);
++fd = -1;
++
++if (!nr_sec) {
++LOGERROR("footer_br: cannot get userdata size\n");
++return -1;
++}
++
++footer_offset =
++((off64_t)nr_sec * 512) - CRYPT_FOOTER_OFFSET;
++
++if (footer_offset < 0) {
++LOGERROR("footer_br: userdata too small for crypto footer\n");
++return -1;
++}
++
++LOGINFO("footer_br: userdata footer '%s', offset %lld\n",
++        footer_path.c_str(),
++        (long long)footer_offset);
++
++} else {
++LOGERROR("footer_br: unsupported crypto key location '%s'\n",
++         userdata->Crypto_Key_Location.c_str());
++return -1;
++}
++
++fd = open(footer_path.c_str(), O_RDONLY | O_CLOEXEC);
++if (fd < 0) {
++LOGERROR("footer_br: cannot open '%s' for backup: %s\n",
++         footer_path.c_str(), strerror(errno));
++return -1;
++}
++
++if (lseek64(fd, footer_offset, SEEK_SET) == -1) {
++LOGERROR("footer_br: backup seek failed: %s\n",
++         strerror(errno));
++close(fd);
++return -1;
++}
++
++size_t done = 0;
++
++while (done < sizeof(footer)) {
++ssize_t n = read(fd, footer + done, sizeof(footer) - done);
++
++if (n < 0 && errno == EINTR)
++continue;
++
++if (n <= 0) {
++LOGERROR("footer_br: backup read failed at %zu/%zu: %s\n",
++         done, sizeof(footer),
++         n < 0 ? strerror(errno) : "unexpected EOF");
++close(fd);
++return -1;
++}
++
++done += n;
++}
++
++close(fd);
++footer_valid = true;
++
++LOGINFO("footer_br: backed up %zu bytes from '%s'\n",
++        sizeof(footer), footer_path.c_str());
++
++return 0;
++}
++
++if (command == "restore") {
++if (!footer_valid || footer_path.empty()) {
++LOGERROR("footer_br: no valid backup to restore\n");
++return -1;
++}
++
++fd = open(footer_path.c_str(),
++          O_WRONLY | O_CLOEXEC);
++
++if (fd < 0) {
++LOGERROR("footer_br: cannot open '%s' for restore: %s\n",
++         footer_path.c_str(), strerror(errno));
++return -1;
++}
++
++if (lseek64(fd, footer_offset, SEEK_SET) == -1) {
++LOGERROR("footer_br: restore seek failed: %s\n",
++         strerror(errno));
++close(fd);
++return -1;
++}
++
++size_t done = 0;
++
++while (done < sizeof(footer)) {
++ssize_t n = write(fd, footer + done, sizeof(footer) - done);
++
++if (n < 0 && errno == EINTR)
++continue;
++
++if (n <= 0) {
++LOGERROR("footer_br: restore write failed at %zu/%zu: %s\n",
++         done, sizeof(footer),
++         n < 0 ? strerror(errno) : "zero-length write");
++close(fd);
++return -1;
++}
++
++done += n;
++}
++
++if (fsync(fd) != 0) {
++LOGERROR("footer_br: fsync failed: %s\n", strerror(errno));
++close(fd);
++return -1;
++}
++
++close(fd);
++
++LOGINFO("footer_br: restored %zu bytes to '%s'\n",
++        sizeof(footer), footer_path.c_str());
++
++return 0;
++}
++
++LOGERROR("footer_br: unknown command '%s'\n", command.c_str());
++return -1;
+ }
+ 
+ /* vdc Functions */
+@@ -995,7 +1155,10 @@ int Exec_vdc_cryptfs(const string& command, const string& argument, vdc_ReturnVa
+ 	}
+ 
+ 	// getpwtype and checkpw commands are removed from Pie vdc, using modified vdc_pie
+-	const char *cmd[] = { "/system/bin/vdc_pie", "cryptfs" };
++	// vdc_pie lives in the recovery ramdisk at /sbin: on legacy devices the
++	// /system mount covers the ramdisk /system/bin, so the path below must
++	// stay outside /system to resolve after the system partition is mounted.
++	const char *cmd[] = { "/sbin/vdc_pie", "cryptfs" };
+ 	if (sdkver < 28)
+ 		cmd[0] = "/system/bin/vdc";
+ 	const char *env[] = { "LD_LIBRARY_PATH=/system/lib64:/system/lib", NULL };
+@@ -1124,6 +1287,7 @@ int Exec_vdc_cryptfs(const string& command, const string& argument, vdc_ReturnVa
+ 	}
+ }
+ 
++
+ int Run_vdc(const string& Password) {
+ 	int res;
+ 	struct timeval t1, t2;
+@@ -1287,6 +1451,48 @@ int Vold_Decrypt_Core(const string& Password) {
+ 	Update_Patch_Level();
+ #endif
+ 
++	/*
++	 * TB-8505X Microtrust crypto stack.
++	 *
++	 * Beanpod Keymaster MUST be started only after Update_Patch_Level()
++	 * has made recovery advertise the installed Android OS version/SPL.
++	 * Starting it earlier can cause Android 10 FDE key blobs to be
++	 * upgraded against the recovery build version.
++	 */
++	LOGINFO("TB8505X: starting Gatekeeper and Beanpod after patch-level override...\n");
++
++	property_set("ctl.stop", "vendor.gatekeeper-1-0");
++	property_set("ctl.stop", "vendor.keymaster-4-0-beanpod");
++	usleep(100000);
++
++	property_set("ctl.start", "vendor.gatekeeper-1-0");
++	property_set("ctl.start", "vendor.keymaster-4-0-beanpod");
++
++	{
++		char km_state[PROPERTY_VALUE_MAX];
++		bool km_ready = false;
++
++		for (int retry = 0; retry < 100; retry++) {
++			property_get("init.svc.vendor.keymaster-4-0-beanpod",
++			             km_state, "");
++
++			if (strcmp(km_state, "running") == 0) {
++				km_ready = true;
++				break;
++			}
++
++			usleep(100000);
++		}
++
++		if (!km_ready) {
++			LOGERROR("TB8505X: Beanpod Keymaster failed to start after patch-level override\n");
++			Revert_Patch_Level();
++			return VD_ERR_VOLD_FAILED_TO_START;
++		}
++
++		LOGINFO("TB8505X: Beanpod Keymaster running with stock OS/SPL properties\n");
++	}
++
+ 	// Start services needed for vold decrypt
+ 	LOGINFO("Starting services...\n");
+ #ifdef TW_CRYPTO_SYSTEM_VOLD_SERVICES
+@@ -1327,20 +1533,30 @@ int Vold_Decrypt_Core(const string& Password) {
+ 		* after vold operations
+ 		*/
+ 		if (sdkver > 25) {
+-			if (footer_br("backup") == 0) {
+-				LOGINFO("footer_br: crypto footer backed up\n");
+-				res = Run_vdc(Password);
+-				if (footer_br("restore") == 0)
+-					LOGINFO("footer_br: crypto footer restored\n");
+-				else
+-					LOGERROR("footer_br: Failed to restore crypto footer\n");
+-			} else {
+-				LOGERROR("footer_br: Failed to backup crypto footer, \
+-					skipping decrypt to prevent data loss. Reboot recovery to try again...\n");
+-				res = -1;
+-			}
++		        if (footer_br("backup") == 0) {
++		                LOGINFO("footer_br: crypto metadata backed up\n");
++
++		                res = Run_vdc(Password);
++
++		                if (footer_br("restore") == 0) {
++		                        LOGINFO("footer_br: crypto metadata restored\n");
++		                } else {
++		                        LOGERROR("footer_br: CRITICAL: failed to restore crypto metadata\n");
++
++		                        /*
++		                         * Metadata restore is part of the decrypt transaction.
++		                         * Never report a successful decrypt if the original
++		                         * crypto metadata could not be restored exactly.
++		                         */
++		                        res = -1;
++		                }
++		        } else {
++		                LOGERROR("footer_br: failed to backup crypto metadata; "
++		                         "skipping decrypt to prevent data loss\n");
++		                res = -1;
++		        }
+ 		} else {
+-			res = Run_vdc(Password);
++		        res = Run_vdc(Password);
+ 		}
+ 
+ 		if (res != 0) {
+@@ -1350,23 +1566,61 @@ int Vold_Decrypt_Core(const string& Password) {
+ 		LOGINFO("Failed to start vold\n");
+ 		res = VD_ERR_VOLD_FAILED_TO_START;
+ 	}
++/*
++         * TB-8505X:
++         * Stop all custom crypto processes before reverting props and before
++         * TWRP attempts to unmount /system_root and /vendor.
++         */
++        LOGINFO("TB8505X: stopping Microtrust crypto services...\n");
++
++        // Any later retry must perform a fresh bootstrap.
++        property_set("tw.tb8505x.crypto.services.ready", "0");
++
++        property_set("ctl.stop", "vendor.keymaster-4-0-beanpod");
++        property_set("ctl.stop", "vendor.gatekeeper-1-0");
++        property_set("ctl.stop", "recovery_teei_capi");
++        property_set("ctl.stop", "recovery_stock_hwservicemanager");
++
++        usleep(300000);
++
+ #ifdef TW_INCLUDE_LIBRESETPROP
+-	Revert_Patch_Level();
++        Revert_Patch_Level();
+ #endif
+-	// Stop services needed for vold decrypt so /system can be unmounted
+-	LOGINFO("Stopping services...\n");
+-	Stop_Service("sys_vold");
++
++        // Stop services needed for vold decrypt so /system can be unmounted.
++        LOGINFO("Stopping services...\n");
++        Stop_Service("sys_vold");
++
+ #ifdef TW_CRYPTO_SYSTEM_VOLD_SERVICES
+-	for (size_t i = 0; i < Services.size(); ++i) {
+-		if (!Is_Service_Running(Services[i].VOLD_Service_Name) && Services[i].resume)
+-			Stop_Service(Services[i].TWRP_Service_Name);
+-		else if (Services[i].bin_exists)
+-			Stop_Service(Services[i].VOLD_Service_Name);
+-	}
++        for (size_t i = 0; i < Services.size(); ++i) {
++                if (!Is_Service_Running(Services[i].VOLD_Service_Name) &&
++                    Services[i].resume) {
++                        Stop_Service(Services[i].TWRP_Service_Name);
++                } else if (Services[i].bin_exists) {
++                        Stop_Service(Services[i].VOLD_Service_Name);
++                }
++        }
+ #endif
+ 
+-	if (is_firmware_symlinked)
+-		Restore_Firmware_Folder();
++        /*
++         * TB-8505X:
++         * auto_decrypt.sh bind-mounts stock system VINTF at
++         * /system/etc/vintf for stock hwservicemanager/keymaster.
++         *
++         * Remove the bind after crypto services/vold are stopped and before
++         * TWRP tries to unmount /system_root.
++         */
++        if (umount("/system/etc/vintf") == 0) {
++                LOGINFO("TB8505X: unmounted stock VINTF bind '/system/etc/vintf'\n");
++        } else if (errno == EINVAL || errno == ENOENT) {
++                LOGINFO("TB8505X: stock VINTF bind already unmounted\n");
++        } else {
++                LOGERROR("TB8505X: failed to unmount stock VINTF bind: %s\n",
++                         strerror(errno));
++        }
++
++        if (is_firmware_symlinked)
++        Restore_Firmware_Folder();
+ 	if (is_vendor_symlinked)
+ 		Restore_Vendor_Folder();
+ 	if (is_fstab_symlinked)
+@@ -1379,6 +1633,27 @@ int Vold_Decrypt_Core(const string& Password) {
+ 		umount2(PartitionManager.Get_Android_Root_Path().c_str(), MNT_DETACH);
+ 	}
+ 
++        /*
++         * TB-8505X:
++         * Microtrust crypto bootstrap may leave the original /vendor mount
++         * busy even after crypto userspace services are stopped.
++         *
++         * Try a normal unmount first. Only this crypto cleanup path may fall
++         * back to MNT_DETACH for the stale vendor mount.
++         */
++        if (PartitionManager.Is_Mounted_By_Path("/vendor")) {
++                if (!PartitionManager.UnMount_By_Path("/vendor", false)) {
++                        LOGINFO("TB8505X: /vendor still busy after crypto; detaching stale mount\n");
++
++                        if (umount2("/vendor", MNT_DETACH) == 0) {
++                                LOGINFO("TB8505X: stale /vendor mount detached\n");
++                        } else {
++                                LOGERROR("TB8505X: failed to detach stale /vendor mount: %s\n",
++                                         strerror(errno));
++                        }
++                }
++        }
++
+ #ifdef TW_CRYPTO_SYSTEM_VOLD_MOUNT
+ 	for (size_t i = 0; i < partitions.size(); ++i) {
+ 		string mnt_point = "/" + partitions[i];
+@@ -1393,6 +1668,17 @@ int Vold_Decrypt_Core(const string& Password) {
+ 
+ 	LOGINFO("Finished.\n");
+ 
++	// TWRP's vold_decrypt forces hwservicemanager.ready=false at start
++	// (Set_Needed_Properties), but nothing restores it to true in this
++	// build (the restore path is under TW_CRYPTO_SYSTEM_VOLD_SERVICES,
++	// which is not compiled here). Every later vold keymaster call then
++	// blocks forever in libhidlbase's ServiceManagement wait loop
++	// ("Waited for hwservicemanager.ready"). Restore it unconditionally
++	// so subsequent decryption attempts (GUI retry) work.
++	property_set("hwservicemanager.ready", "true");
++	property_set("sys.listeners.registered", "true");
++	property_set("vendor.sys.listeners.registered", "true");
++
+ #ifdef TW_CRYPTO_SYSTEM_VOLD_SERVICES
+ 	Set_Needed_Properties();
+ 	// Restart previously running services
+diff --git a/etc/init.rc b/etc/init.rc
+index 8542196..f9db758 100644
+--- a/etc/init.rc
++++ b/etc/init.rc
+@@ -4,6 +4,7 @@ import /init.recovery.mksh.rc
+ import /init.recovery.usb.rc
+ import /init.recovery.service.rc
+ import /init.recovery.vold_decrypt.rc
++import /init.recovery.crypto.rc
+ import /init.recovery.${ro.hardware}.rc
+ 
+ on early-init
+diff --git a/gui/action.cpp b/gui/action.cpp
+index 87e9f30..df6f26a 100755
+--- a/gui/action.cpp
++++ b/gui/action.cpp
+@@ -1928,11 +1928,8 @@ int GUIAction::mountsystemtoggle(std::string arg)
+ 		}
+ 		Part = PartitionManager.Find_Partition_By_Path("/vendor");
+ 		if (Part) {
+-			if (arg == "0") {
+-				Part->Change_Mount_Read_Only(false);
+-			} else {
+-				Part->Change_Mount_Read_Only(true);
+-			}
++			/* TB-8505X: vendor must remain read-only */
++Part->Change_Mount_Read_Only(true);
+ 			if (remount_vendor) {
+ 				Part->Mount(true);
+ 			}
+diff --git a/gui/theme/common/languages/en.xml b/gui/theme/common/languages/en.xml
+index 35b2bbe..1363598 100755
+--- a/gui/theme/common/languages/en.xml
++++ b/gui/theme/common/languages/en.xml
+@@ -33,7 +33,7 @@
+ 		<string name="autostorage">Storage</string>
+ 
+ 		<!-- GUI XML strings -->
+-		<string name="twrp_header">Team Win Recovery Project</string>
++		<string name="twrp_header">Team Win Recovery Project by NK203</string>
+ 		<string name="twrp_watch_header">TWRP %tw_version%</string>
+ 		<string name="cpu_temp">CPU: %tw_cpu_temp% &#xB0;C</string>
+ 		<string name="battery_pct">Battery: %tw_battery%</string>
+diff --git a/partitionmanager.cpp b/partitionmanager.cpp
+index 852209b..a83d2ad 100755
+--- a/partitionmanager.cpp
++++ b/partitionmanager.cpp
+@@ -398,6 +398,33 @@ void TWPartitionManager::Decrypt_Data() {
+ 	#ifdef TW_INCLUDE_CRYPTO
+ 	TWPartition* Decrypt_Data = Find_Partition_By_Path("/data");
+ 	if (Decrypt_Data && Decrypt_Data->Is_Encrypted && !Decrypt_Data->Is_Decrypted) {
++		/*
++		 * TB-8505X:
++		 * Wait until the Microtrust TEE/CAPI bootstrap is prepared.
++		 * Decryption itself remains owned by TWRP vold_decrypt().
++		 */
++		char tb8505x_ready[PROPERTY_VALUE_MAX];
++		property_get("tw.tb8505x.crypto.services.ready", tb8505x_ready, "0");
++
++		if (strcmp(tb8505x_ready, "1") != 0) {
++			LOGINFO("TB8505X: waiting for Microtrust crypto bootstrap...\n");
++
++			for (int retry = 0; retry < 200; retry++) {
++				property_get("tw.tb8505x.crypto.services.ready",
++				             tb8505x_ready, "0");
++
++				if (strcmp(tb8505x_ready, "1") == 0)
++					break;
++
++				usleep(100000);
++			}
++		}
++
++		if (strcmp(tb8505x_ready, "1") != 0)
++			LOGERR("TB8505X: Microtrust bootstrap timeout; continuing with native decrypt path\n");
++		else
++			LOGINFO("TB8505X: Microtrust bootstrap ready\n");
++
+ 		property_set("ro.crypto.state", "encrypted");
+ 		if (!Decrypt_Data->Key_Directory.empty() && Mount_By_Path(Decrypt_Data->Key_Directory, false)) {
+ 		property_set("ro.crypto.type", "file");
+@@ -1944,6 +1971,28 @@ int TWPartitionManager::Decrypt_Device(string Password, int user_id) {
+ 		return 0;
+ 	}
+ 
++#ifdef TW_CRYPTO_USE_SYSTEM_VOLD
++	// TB8505F (Android 10 SAR + PureSW keymaster): skip TWRP's built-in
++	// cryptfs entirely. The legacy keymaster path fails on Android 10
++	// ("could not find any keystore module" -> SIGABRT) and, worse, leaves a
++	// stale dm-0 ("userdata") behind when the password check fails after the
++	// master key was decrypted, making every later attempt fail with
++	// "Cannot create dm-crypt device userdata: Device or resource busy".
++	// Going straight to vold_decrypt uses the exact same working path as the
++	// CLI (twrp decrypt <password>) - keymaster via beanpod + vold checkpw -
++	// for pattern, PIN, password and default_password alike.
++	int pwret = vold_decrypt(Password);
++	switch (pwret) {
++		case VD_SUCCESS:
++			break;
++		case VD_ERR_MISSING_VDC:
++			gui_msg(Msg(msg::kError, "decrypt_data_vold_os_missing=Missing files needed for vold decrypt: {1}")("/system/bin/vdc"));
++			break;
++		case VD_ERR_MISSING_VOLD:
++			gui_msg(Msg(msg::kError, "decrypt_data_vold_os_missing=Missing files needed for vold decrypt: {1}")("/system/bin/vold"));
++			break;
++	}
++#else
+ 	int pwret = -1;
+ 	pid_t pid = fork();
+ 	if (pid < 0) {
+@@ -1964,7 +2013,6 @@ int TWPartitionManager::Decrypt_Device(string Password, int user_id) {
+ 			pwret = WEXITSTATUS(status) ? -1 : 0;
+ 	}
+ 
+-#ifdef TW_CRYPTO_USE_SYSTEM_VOLD
+ 	if (pwret != 0) {
+ 		pwret = vold_decrypt(Password);
+ 		switch (pwret) {
+diff --git a/prebuilt/Android.mk b/prebuilt/Android.mk
+index 28711e8..d2e9d0b 100755
+--- a/prebuilt/Android.mk
++++ b/prebuilt/Android.mk
+@@ -505,7 +505,7 @@ ifeq ($(TW_INCLUDE_CRYPTO), true)
+         LOCAL_MODULE := vdc_pie
+         LOCAL_MODULE_TAGS := optional
+         LOCAL_MODULE_CLASS := RECOVERY_EXECUTABLES
+-        LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/system/bin
++        LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)/sbin
+         LOCAL_SRC_FILES := vdc_pie-$(TARGET_ARCH)
+         include $(BUILD_PREBUILT)
+     endif
+diff --git a/twrp.cpp b/twrp.cpp
+index 5f743d4..cd5a84f 100644
+--- a/twrp.cpp
++++ b/twrp.cpp
+@@ -245,14 +245,14 @@ static void process_recovery_mode(twrpAdbBuFifo* adb_bu_fifo, bool skip_decrypti
+ 				} else if (DataManager::GetIntValue("tw_mount_system_ro") == 0) {
+ 					sys->Change_Mount_Read_Only(false);
+ 					if (ven)
+-						ven->Change_Mount_Read_Only(false);
++						ven->Change_Mount_Read_Only(true); /* TB-8505X: vendor must remain RO */
+ 				}
+ 			} else if (DataManager::GetIntValue("tw_mount_system_ro") == 1) {
+ 				// Do nothing, user selected to leave system read only
+ 			} else {
+ 				sys->Change_Mount_Read_Only(false);
+ 				if (ven)
+-					ven->Change_Mount_Read_Only(false);
++					ven->Change_Mount_Read_Only(true); /* TB-8505X: vendor must remain RO */
+ 			}
+ 		}
+ 	}

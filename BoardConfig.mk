@@ -56,6 +56,9 @@ BOARD_MKBOOTIMG_ARGS += --ramdisk_offset $(BOARD_RAMDISK_OFFSET)
 BOARD_MKBOOTIMG_ARGS += --tags_offset $(BOARD_KERNEL_TAGS_OFFSET)
 BOARD_MKBOOTIMG_ARGS += --header_version $(BOARD_BOOTIMG_HEADER_VERSION)
 
+BOARD_DTB_OFFSET := 0x07808000
+
+BOARD_MKBOOTIMG_ARGS += --dtb_offset $(BOARD_DTB_OFFSET)
 # File systems
 BOARD_HAS_LARGE_FILESYSTEM := true
 BOARD_BOOTIMAGE_PARTITION_SIZE := 33554432
@@ -91,5 +94,49 @@ TW_INCLUDE_NTFS_3G := true
 TARGET_USES_MKE2FS := true
 
 # Debug
+TWRP_INCLUDE_LOGCAT := true
+TARGET_USES_LOGD := true
+
+# Crypto / FDE Decryption Support
+TW_INCLUDE_CRYPTO := true
+TW_INCLUDE_CRYPTO_FBE := true
+TW_CRYPTO_USE_SYSTEM_VOLD := true
+
+TW_CRYPTO_DEFAULT_PASSWORD := "default_password"
+TW_CRYPTO_SKIP_PASSWORD_PROMPT := true
+TW_CRYPTO_USE_ROTARY_DEFAULT := true
+
+TARGET_RECOVERY_DEVICE_MODULES += \
+    libkeymaster4 \
+    libkeymaster4support \
+    libkeymaster_messages \
+    libkeymaster_portable \
+    libpuresoftkeymasterdevice \
+    libsoftgatekeeper \
+    android.hardware.keymaster@4.0 \
+    android.hardware.keymaster@3.0 \
+    android.hardware.gatekeeper@1.0 \
+    libkeystore-engine-wifi-hidl \
+    libkeystore-wifi-hidl \
+    libkmsetkey \
+    libziparchive \
+    libbase \
+    liblog \
+    libcutils \
+    libutils \
+    libselinux \
+    libcrypto \
+    libz
+
+TARGET_RECOVERY_DEVICE_MODULES += \
+    vendor.mediatek.hardware.keymaster_attestation@1.0 \
+    vendor.mediatek.hardware.keymaster_attestation@1.1
+
+TW_LOAD_VENDOR_MODULES := "keymaster_messages keymaster4 keymaster4support keymaster_portable puresoftkeymasterdevice softgatekeeper kmsetkey"
+
+PRODUCT_COPY_FILES += \
+    $(DEVICE_PATH)/recovery/root/sbin/auto_decrypt.sh:$(TARGET_RECOVERY_ROOT_OUT)/sbin/auto_decrypt.sh \
+    $(DEVICE_PATH)/recovery/root/init.recovery.crypto.rc:$(TARGET_RECOVERY_ROOT_OUT)/init.recovery.crypto.rc
+
 TWRP_INCLUDE_LOGCAT := true
 TARGET_USES_LOGD := true

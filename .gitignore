@@ -1,0 +1,35 @@
+# Build artifacts
+*.zip
+*.log
+*.tmp
+*.orig
+*.rej
+*.swp
+*~
+.DS_Store
+
+out/
+obj/
+dist/
+.cache/
+
+# Local bring-up backups / scratch
+backups-v1/
+*.bak
+*.bak-*
+*.bak-*
+*.before-*
+*.old
+
+# Images are normally ignored except required device prebuilts
+*.img
+!prebuilt/dtbo.img
+
+# Historical bring-up patches
+patches/000*.patch
+
+# Historical incremental bring-up patches
+patches/00??-*.patch
+
+# Historical incremental bring-up patches
+patches/00??-*.patch
